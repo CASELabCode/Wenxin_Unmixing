@@ -3,7 +3,7 @@ import numpy as np
 import hypercoast
 import xarray as xr
 
-# 设置路径
+
 input_folder = "./Data/PACE-001/PACE"
 output_folder = "./Data/PACE-001/Processed"
 os.makedirs(output_folder, exist_ok=True)
@@ -80,3 +80,4 @@ if all_rrs_list:
     print("Saved merged file. Shape:", merged_rrs.shape)
 else:
     print("No data saved. All files were empty or invalid.")
+
