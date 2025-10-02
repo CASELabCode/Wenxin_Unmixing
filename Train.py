@@ -99,44 +99,6 @@ class MLP(nn.Module):
         a = self.gen_a(inputs)
         return a
     
-class MLP(nn.Module):
-    def __init__(self, P, bands):
-        super(MLP, self).__init__()
-        self.P = P
-        self.bands = bands
-        self.fc1 = nn.Linear(bands, 128)
-        self.bn1 = nn.BatchNorm1d(128)
-
-        self.fc2 = nn.Linear(128, 64)
-        self.bn2 = nn.BatchNorm1d(64)
-
-        self.fc3 = nn.Linear(64, 16)
-        self.bn3 = nn.BatchNorm1d(16)
-
-        self.fc4 = nn.Linear(16, P)
-
-    def gen_a(self, x):
-        h1 = self.fc1(x)
-        h1 = self.bn1(h1)
-        h1 = F.leaky_relu(h1)
-
-        h2 = self.fc2(h1)
-        h2 = self.bn2(h2)
-        h2 = F.leaky_relu(h2)
-
-        h3 = self.fc3(h2)
-        h3 = self.bn3(h3)
-        h3 = F.leaky_relu(h3)
-
-        h4 = self.fc4(h3)
-        a = torch.abs(h4)
-        a = a / (a.sum(dim=1, keepdim=True) + 1e-8)
-        #a = F.softmax(h6, dim = 1)
-        return a
-    
-    def forward(self, inputs):
-        a = self.gen_a(inputs)
-        return a
     
 class Decoder(nn.Module):
     def __init__(self, n, wavelength_length):
@@ -572,3 +534,4 @@ print(f"Top-1 Accuracy: {top1_correct / total_samples:.4f}")
 print(f"Top-2 Accuracy: {top2_correct / total_samples:.4f}")
 print(f"Top-3 Accuracy: {top3_correct / total_samples:.4f}")
 print(f"Top-4 Accuracy: {top4_correct / total_samples:.4f}")
+
