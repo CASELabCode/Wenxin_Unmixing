@@ -56,74 +56,70 @@ class MLP(nn.Module):
         super(MLP, self).__init__()
         self.P = P
         self.bands = bands
-        self.fc1 = nn.Linear(bands, 128)
-        self.bn1 = nn.BatchNorm1d(128)
 
-        self.fc2 = nn.Linear(128, 128)
-        self.bn2 = nn.BatchNorm1d(128)
+        # --- architecture (encoder) ---
+        self.fc1 = nn.Linear(bands, 512)
+        self.bn1 = nn.BatchNorm1d(512)
 
-        self.fc3 = nn.Linear(128, 64)
-        self.bn3 = nn.BatchNorm1d(64)
+        self.fc2 = nn.Linear(512, 1024)
+        self.bn2 = nn.BatchNorm1d(1024)
 
-        self.fc4 = nn.Linear(64, 16)
-        self.bn4 = nn.BatchNorm1d(16)
+        self.fc3 = nn.Linear(1024, 512)
+        self.bn3 = nn.BatchNorm1d(512)
 
-        self.fc5 = nn.Linear(16, 8)
-        self.fc6 = nn.Linear(8, P)
+        self.fc4 = nn.Linear(512, 256)
+        self.bn4 = nn.BatchNorm1d(256)
+
+        self.fc5 = nn.Linear(256, P)  
 
     def gen_a(self, x):
-        h1 = self.fc1(x)
-        h1 = self.bn1(h1)
-        h1 = F.leaky_relu(h1)
+        h = F.leaky_relu(self.bn1(self.fc1(x)), negative_slope=0.2)
+        h = F.leaky_relu(self.bn2(self.fc2(h)), negative_slope=0.2)
+        h = F.leaky_relu(self.bn3(self.fc3(h)), negative_slope=0.2)
+        h = F.leaky_relu(self.bn4(self.fc4(h)), negative_slope=0.2)
 
-        h2 = self.fc2(h1)
-        h2 = self.bn2(h2)
-        h2 = F.leaky_relu(h2)
+        h = self.fc5(h)
 
-        h3 = self.fc3(h2)
-        h3 = self.bn3(h3)
-        h3 = F.leaky_relu(h3)
-
-        h4 = self.fc4(h3)
-        h4 = self.bn4(h4)
-
-        h5 = self.fc5(h4)
-        h6 = self.fc6(h5)
-
-        a = torch.abs(h6)
-        a = a / (a.sum(dim=1, keepdim=True) + 1e-8)
-        #a = F.softmax(h6, dim = 1)
+        # --- Abs + L1 normalization  ---
+        h_abs = torch.abs(h)
+        a = h_abs / (h_abs.sum(dim=1, keepdim=True) + 1e-8)
         return a
-    
+
     def forward(self, inputs):
-        a = self.gen_a(inputs)
-        return a
+        return self.gen_a(inputs)
     
     
 class Decoder(nn.Module):
     def __init__(self, n, wavelength_length):
         super(Decoder, self).__init__()
         self.n = n
-        self.wavelength_length = wavelength_length
+        self.wavelength_length = wavelength_length  # = B
 
-        self.linear_weights = nn.Parameter(torch.randn(n, 1))  # [n, 1]
-        
-        self.non_linear = nn.Sequential(
-            nn.Linear(n * wavelength_length, 256),
-            nn.ReLU(),
-            nn.Linear(256, wavelength_length),
-        )
-
+        # Learnable linear–nonlinear mixing parameter α
         self.alpha = nn.Parameter(torch.tensor(0.5))
 
-    def forward(self, x):
-        batch_size = x.size(0)
-        linear_combination = x.sum(dim=1) 
-        x_flattened = x.reshape(batch_size, -1)  # [batch_size, n * wavelength_length]
-        non_linear_output = self.non_linear(x_flattened)  # [batch_size, wavelength_length]
+        # --- Nonlinear branch (paper) ---
+        self.fc1 = nn.Linear(n * wavelength_length, 512)
+        self.fc2 = nn.Linear(512, 1024)
+        self.fc3 = nn.Linear(1024, 256)
+        self.fc4 = nn.Linear(256, wavelength_length)
 
+    def forward(self, x):
+
+        batch_size = x.size(0)
+
+        linear_combination = x.sum(dim=1)   # shape = [batch, B]
+        x_flat = x.reshape(batch_size, -1)  # [batch, n*B]
+
+        h = F.leaky_relu(self.fc1(x_flat), negative_slope=0.2)
+        h = F.leaky_relu(self.fc2(h), negative_slope=0.2)
+        h = F.leaky_relu(self.fc3(h), negative_slope=0.2)
+        nonlinear_output = self.fc4(h)      # [batch, B]
+
+        # -------- Hybrid combination -------- #
         alpha = torch.sigmoid(self.alpha)
-        output =  alpha * linear_combination + (1-alpha) * non_linear_output
+        output = alpha * linear_combination + (1 - alpha) * nonlinear_output
+
         return output
 
 #------------------------------------------------------Load Rrs-----------------------------------------------------#   
@@ -152,7 +148,7 @@ EM_normalized = (EM - min_values_em) / (max_values_em - min_values_em + 1e-8)
 EM = torch.tensor(EM_normalized, dtype=torch.float32).to(device)
 print(f"EM Tensor shape: {EM.shape}")
 
-#----------------------------------------------Load Endmembers Ground Truth-----------------------------------------#
+#----------------------------------------------Load Abundance Ground Truth-----------------------------------------#
 
 gt_abundances = pd.read_csv('./Data/labeled_data/clean_Data/new/clean_gt_all_new.csv', header=None, skiprows=1).iloc[:, 1:].values
 gt_abundances = gt_abundances / 100.0
@@ -166,24 +162,6 @@ def EM_with_weight(a, EM):
     output = a_expanded * EM_expanded
     return output
 
-def criteria_penalty(Rrs_input, abundance, wavelengths, alpha=1.0):
-    """
-    Add penalty if 620nm ≈ 650nm and abundance of certain types is high.
-    """
-    idx_620 = np.argmin(np.abs(wavelengths - 620))
-    idx_650 = np.argmin(np.abs(wavelengths - 650))
-
-    rrs_620 = Rrs_input[:, idx_620]  # shape: [B]
-    rrs_650 = Rrs_input[:, idx_650]  # shape: [B]
-
-
-    mask = torch.abs(rrs_650 - rrs_620) < 0.002  
-    a_sub = abundance[:, [0, 1, 2]]  # shape: [B, 3]
-    a_sum = torch.sum(a_sub, dim=1)  # shape: [B]
-
-    penalty = torch.where(mask, a_sum, torch.zeros_like(a_sum))
-
-    return alpha * penalty.mean()
 #---------------------------------------------------dir------------------------------------------------------#
 
 output_dir = "./Output/all_new/test40"
@@ -242,13 +220,15 @@ for round_idx in range(num_rounds):
     decoder = Decoder(P, wavelength_length=bands).to(device)
 
     abun_weight = torch.nn.Parameter(torch.ones(6, device=device)) 
+    lambda_abun = nn.Parameter(torch.tensor(0.0, device=device))
+    lambda_recon = nn.Parameter(torch.tensor(0.0, device=device))
     optimizer = torch.optim.AdamW(
-        list(model.parameters()) + list(decoder.parameters()) + [abun_weight],
+        list(model.parameters()) + list(decoder.parameters()) + [abun_weight] + [lambda_abun, lambda_recon],
         lr=1e-4,
         weight_decay=1e-4
     )
 
-    epochs = 70
+    epochs = 50
 
     losses = []
     print('Start training!')
@@ -278,7 +258,6 @@ for round_idx in range(num_rounds):
 
             a_cdom = a[:, 11:12]
             a_nap = a[:, 12:13]
-            #a_grouped_scaled = a_gt * (1 - a_cdom -a_nap)
 
             #cyano 620-650
             rrs_650 = y[:, idx_650]
@@ -293,17 +272,13 @@ for round_idx in range(num_rounds):
             penalty_when_positive = condition_mask * target_penalty  
             #penalty_loss = torch.mean(condition_mask * target_penalty)
 
-            a_diatom = a_grouped[:, 3]
-            diatom_penalty = F.relu(0.4 - a_diatom)
-            penalty_when_negative = inverse_mask * diatom_penalty
-
             penalty_loss = torch.mean(penalty_when_positive )
 
             # cyano high, dino hapto low
             a2 = a_grouped[:, 2]
             a4 = a_grouped[:, 4]
-            a2_mask = (a2 > 0.25).float()
-            mutual_penalty = torch.mean(a2_mask* a2 * (a4))
+            indicator = ((a2 > 0.25) | (a4 > 0.25)).float()
+            mutual_penalty = torch.mean(indicator * a2 * a4)
 
             mse = (a_grouped - a_gt) ** 2 
             max_indices = torch.argmax(a_gt, dim=1)
@@ -314,8 +289,9 @@ for round_idx in range(num_rounds):
             loss_abun = torch.mean(weights * mse)
 
             loss_recon = torch.mean((y_hat - y) ** 2)
-            #loss_abun = torch.mean((a_grouped - a_gt)**2) #modified
-            loss = 0.1 * loss_recon + loss_abun + 0.1 * penalty_loss + 0.1*mutual_penalty
+            w_abun = torch.exp(lambda_abun)
+            w_recon = torch.exp(lambda_recon)
+            loss = (w_abun * loss_abun + w_recon * loss_recon + 0.1 * penalty_loss + 0.1 * mutual_penalty)
 
             optimizer.zero_grad()
             loss.backward()
@@ -534,4 +510,3 @@ print(f"Top-1 Accuracy: {top1_correct / total_samples:.4f}")
 print(f"Top-2 Accuracy: {top2_correct / total_samples:.4f}")
 print(f"Top-3 Accuracy: {top3_correct / total_samples:.4f}")
 print(f"Top-4 Accuracy: {top4_correct / total_samples:.4f}")
-
